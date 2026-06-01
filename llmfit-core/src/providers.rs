@@ -1466,6 +1466,52 @@ fn gguf_search_term(model_tag: &str) -> String {
     s
 }
 
+/// Pick a GGUF filename biased toward a hardware-friendly quant (4-bit first),
+/// instead of grabbing the largest file (Q8_0 / F16) which rarely fits a
+/// consumer GPU. Falls back to the smallest file if no known quant is matched.
+fn select_preferred_gguf(files: &[(String, u64)]) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    const PREF: &[&str] = &[
+        "q4_k_m", "q4_k_s", "iq4_xs", "iq4_nl", "q4_0", "q5_k_m", "q5_k_s",
+        "q3_k_m", "q3_k_s", "iq3_m", "q6_k", "q8_0", "iq2_m", "q2_k",
+    ];
+    let lowered: Vec<(String, String)> =
+        files.iter().map(|(f, _)| (f.clone(), f.to_lowercase())).collect();
+    for p in PREF {
+        if let Some((f, _)) = lowered.iter().find(|(_, l)| l.contains(p)) {
+            return Some(f.clone());
+        }
+    }
+    // No recognized quant tag → smallest file (safer for VRAM than the largest).
+    files.iter().min_by_key(|(_, s)| *s).map(|(f, _)| f.clone())
+}
+
+/// Ranking key for choosing among GGUF search results: lower = preferred.
+/// Trusted/official quantizers float to the top; fine-tune red-flags sink.
+fn repo_rank(repo_id: &str) -> i32 {
+    let lower = repo_id.to_lowercase();
+    let owner = lower.split('/').next().unwrap_or("");
+    const TRUSTED: &[&str] = &[
+        "unsloth", "bartowski", "ggml-org", "lmstudio-community", "mradermacher",
+        "thebloke", "qwen", "google", "meta-llama", "microsoft", "mistralai",
+        "nvidia", "deepseek-ai",
+    ];
+    const REDFLAG: &[&str] = &[
+        "uncensored", "abliterated", "heretic", "aggressive", "nsfw", "roleplay",
+        "erp", "lewd", "horny",
+    ];
+    let mut score = 0;
+    if TRUSTED.iter().any(|t| owner == *t) {
+        score -= 100;
+    }
+    if REDFLAG.iter().any(|r| lower.contains(r)) {
+        score += 100;
+    }
+    score
+}
+
 impl ModelProvider for LlamaCppProvider {
     fn name(&self) -> &str {
         "llama.cpp"
@@ -1500,8 +1546,7 @@ impl ModelProvider for LlamaCppProvider {
         if model_tag.contains('/') {
             let files = Self::list_repo_gguf_files(model_tag);
             if !files.is_empty() {
-                let filename = Self::select_best_gguf(&files, 999.0)
-                    .map(|(f, _)| f)
+                let filename = select_preferred_gguf(&files)
                     .unwrap_or_else(|| files[0].0.clone());
                 return self.download_gguf(model_tag, &filename);
             }
@@ -1511,20 +1556,21 @@ impl ModelProvider for LlamaCppProvider {
         }
 
         // Search HuggingFace for a GGUF build, using a cleaned base-name term.
-        // Iterate the (download-sorted) results and use the first repo that
-        // actually contains GGUF files — the top hit is sometimes the original
-        // (non-GGUF) repo merely tagged with the gguf library.
+        // Rank results so trusted/official quantizers (unsloth, bartowski, the
+        // model's own org, …) are tried before random community fine-tunes
+        // (uncensored/abliterated/…), then use the first repo with GGUF files and
+        // pick a hardware-friendly quant (4-bit) rather than the largest file.
         let search_term = gguf_search_term(model_tag);
-        let results = Self::search_hf_gguf(&search_term);
+        let mut results = Self::search_hf_gguf(&search_term);
+        results.sort_by_key(|(repo, _)| repo_rank(repo)); // stable: keeps HF download order within a rank
         for (repo_id, _) in &results {
             let files = Self::list_repo_gguf_files(repo_id);
             if files.is_empty() {
                 continue;
             }
-            let filename = Self::select_best_gguf(&files, 999.0)
-                .map(|(f, _)| f)
-                .unwrap_or_else(|| files[0].0.clone());
-            return self.download_gguf(repo_id, &filename);
+            if let Some(filename) = select_preferred_gguf(&files) {
+                return self.download_gguf(repo_id, &filename);
+            }
         }
         Err(format!(
             "No GGUF build found to download for '{}'. This model may only be \

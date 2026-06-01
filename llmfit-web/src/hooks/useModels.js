@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { fetchModels } from '../api';
 import { useFilters } from '../contexts/FilterContext';
 import { useModelContext } from '../contexts/ModelContext';
-import { applyClientFitFilter, applyClientFilters } from '../utils';
+import { applyClientFitFilter, applyClientFilters, excludeNonNvidia } from '../utils';
 
 export function useModels() {
   const filters = useFilters();
@@ -26,9 +26,11 @@ export function useModels() {
       setError('');
       try {
         const payload = await fetchModels(filters, appliedSimulation, controller.signal);
-        const fetchedModels = Array.isArray(payload.models)
-          ? payload.models
-          : [];
+        // Drop models that can't run on an NVIDIA GPU via llama.cpp/GGUF
+        // (MXFP4/AWQ/GPTQ/FP8/MLX/EXL2/bnb) before any other processing.
+        const fetchedModels = excludeNonNvidia(
+          Array.isArray(payload.models) ? payload.models : []
+        );
 
         const fitFiltered = applyClientFitFilter(fetchedModels, filters.minFit);
         setAllModels(fitFiltered);

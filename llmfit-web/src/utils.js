@@ -5,6 +5,24 @@ export function round(value, digits = 1) {
   return value.toFixed(digits);
 }
 
+// Formats that cannot run on an NVIDIA GPU via the llama.cpp / GGUF stack:
+//   MXFP4 (AMD Quark, ROCm-only) | AWQ / GPTQ / FP8 (need vLLM/TRT-LLM) |
+//   MLX (Apple-only) | EXL2 (ExLlama) | bitsandbytes int4/int8/nf4.
+const NON_NVIDIA_FORMAT_RE =
+  /(mxfp4|\bawq\b|\bgptq\b|\bfp8\b|\bmlx\b|mlx-community|exl2|exllama|\bint4\b|\bint8\b|\bnf4\b|\bbnb\b)/i;
+
+// A catalog model is NVIDIA-runnable if its name doesn't advertise a non-GGUF /
+// non-NVIDIA quant format. (Base / GGUF repos pass; a GGUF build can then be
+// resolved for them.)
+export function isNvidiaRunnable(model) {
+  const name = (model && model.name) || '';
+  return !NON_NVIDIA_FORMAT_RE.test(name);
+}
+
+export function excludeNonNvidia(models) {
+  return Array.isArray(models) ? models.filter(isNvidiaRunnable) : [];
+}
+
 export function fitClass(code) {
   return `fit fit-${code || 'unknown'}`;
 }
