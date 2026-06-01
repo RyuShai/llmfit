@@ -977,6 +977,15 @@ impl LlamaCppProvider {
         let total_parts = jobs.len();
         let (tx, rx) = std::sync::mpsc::channel();
 
+        // Capture repo_id and primary filename for registry_yaml (opt-in via env var).
+        let repo_id_clone = repo_id.to_string();
+        let primary_filename = jobs
+            .first()
+            .and_then(|(_, dest)| dest.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
         std::thread::spawn(move || {
             for (idx, (url, dest_path)) in jobs.into_iter().enumerate() {
                 let part_num = idx + 1;
@@ -1131,6 +1140,27 @@ impl LlamaCppProvider {
                 status: "Download complete!".to_string(),
                 percent: Some(100.0),
             });
+
+            // Register the downloaded model in the llm-control models.yaml (opt-in).
+            // Failure must NOT fail the download — surface as a progress note only.
+            if std::env::var("LLMFIT_REGISTRY_YAML").is_ok() && !primary_filename.is_empty() {
+                match crate::registry_yaml::register_model_yaml(&primary_filename, &repo_id_clone, None) {
+                    Ok(true) => {
+                        let _ = tx.send(PullEvent::Progress {
+                            status: format!("Registered {} in models.yaml", primary_filename),
+                            percent: Some(100.0),
+                        });
+                    }
+                    Ok(false) => { /* skipped (duplicate or env unset) — silent */ }
+                    Err(e) => {
+                        let _ = tx.send(PullEvent::Progress {
+                            status: format!("Registered download, but registry update failed: {e}"),
+                            percent: Some(100.0),
+                        });
+                    }
+                }
+            }
+
             let _ = tx.send(PullEvent::Done);
         });
 

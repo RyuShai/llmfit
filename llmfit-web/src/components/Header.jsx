@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useFilterDispatch } from '../contexts/FilterContext';
 import { useI18n } from '../contexts/I18nContext';
 import { useModelContext } from '../contexts/ModelContext';
+import { startUpdate, fetchUpdateStatus } from '../api';
 
 const THEME_KEY = 'llmfit-theme';
 
@@ -46,6 +47,37 @@ export default function Header() {
   const [theme, setTheme] = useState(initialTheme);
   const dispatch = useFilterDispatch();
   const { triggerRefresh } = useModelContext();
+  const [updating, setUpdating] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  function showToast(kind, msg) {
+    setToast({ kind, msg });
+    setTimeout(() => setToast(null), 4000);
+  }
+
+  async function onUpdate() {
+    setUpdating(true);
+    try {
+      await startUpdate();
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const s = await fetchUpdateStatus();
+        if (s.status === 'done') {
+          showToast('success', t('header.updateDone', { count: s.new_count }));
+          triggerRefresh();
+          break;
+        }
+        if (s.status === 'error') {
+          showToast('error', t('header.updateError', { error: s.message }));
+          break;
+        }
+      }
+    } catch (e) {
+      showToast('error', t('header.updateError', { error: e.message }));
+    } finally {
+      setUpdating(false);
+    }
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -60,6 +92,16 @@ export default function Header() {
         <p className="hero-copy">{t('header.copy')}</p>
       </div>
 
+      {toast && (
+        <div
+          className={`alert${toast.kind === 'error' ? ' error' : ''}`}
+          role="status"
+          style={{ margin: '0 0 0.5rem 0' }}
+        >
+          {toast.msg}
+        </div>
+      )}
+
       <div className="hero-actions">
         <button
           type="button"
@@ -67,6 +109,14 @@ export default function Header() {
           className="btn btn-ghost"
         >
           {t('header.resetFilters')}
+        </button>
+        <button
+          type="button"
+          disabled={updating}
+          onClick={onUpdate}
+          className="btn btn-accent"
+        >
+          {updating ? t('header.updating') : t('header.update')}
         </button>
         <button
           type="button"

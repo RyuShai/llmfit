@@ -9,6 +9,10 @@ const en = {
     title: 'llmfit Dashboard',
     copy: 'Hundreds of models & providers. One command to find what runs on your hardware.',
     resetFilters: 'Reset filters',
+    update: 'Update',
+    updating: 'Updating…',
+    updateDone: ({ count }) => `Model catalog updated — ${count} new`,
+    updateError: ({ error }) => `Update failed: ${error}`,
     refresh: 'Refresh',
     themeLabel: 'Theme',
     localeLabel: 'Language'
@@ -64,7 +68,11 @@ const en = {
     title: 'Model Fit Explorer',
     compareAction: ({ count }) => `Compare (${count})`,
     compareDisabledTooltip: 'Select at least 2 models to compare',
-    summary: ({ returned, total }) => `${returned} shown / ${total} matched`
+    summary: ({ returned, total }) => `${returned} shown / ${total} matched`,
+    installAction: ({ count }) => `Install (${count})`,
+    installing: ({ done, total }) => `Installing ${done}/${total}…`,
+    installDone: ({ count }) => `Installed ${count} model(s)`,
+    installError: ({ errors }) => `Some installs failed: ${errors}`
   },
   filters: {
     searchLabel: 'Search',
@@ -148,9 +156,11 @@ const en = {
     copyModelName: 'Copy model name',
     addToComparison: 'Add to comparison',
     maxCompare: ({ count }) => `Max ${count} models for comparison`,
+    selectToInstall: 'Select to install',
     installed: 'Installed',
     columns: {
       compare: 'Cmp',
+      install: 'Get',
       model: 'Model',
       provider: 'Provider',
       params: 'Params',

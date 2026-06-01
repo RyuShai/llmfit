@@ -9,6 +9,10 @@ const zhCN = {
     title: 'llmfit 控制台',
     copy: '聚合海量模型与提供方，用一条命令找出哪些模型能在你的硬件上真正跑起来。',
     resetFilters: '重置筛选',
+    update: '更新',
+    updating: '更新中…',
+    updateDone: ({ count }) => `模型目录已更新 — 新增 ${count} 个`,
+    updateError: ({ error }) => `更新失败：${error}`,
     refresh: '刷新',
     themeLabel: '主题',
     localeLabel: '语言'
@@ -64,7 +68,11 @@ const zhCN = {
     title: '模型适配分析',
     compareAction: ({ count }) => `对比（${count}）`,
     compareDisabledTooltip: '至少选择 2 个模型后才能对比',
-    summary: ({ returned, total }) => `当前显示 ${returned} / 匹配 ${total}`
+    summary: ({ returned, total }) => `当前显示 ${returned} / 匹配 ${total}`,
+    installAction: ({ count }) => `安装（${count}）`,
+    installing: ({ done, total }) => `安装中 ${done}/${total}…`,
+    installDone: ({ count }) => `已安装 ${count} 个模型`,
+    installError: ({ errors }) => `部分安装失败：${errors}`
   },
   filters: {
     searchLabel: '搜索',
@@ -148,9 +156,11 @@ const zhCN = {
     copyModelName: '复制模型名称',
     addToComparison: '加入对比',
     maxCompare: ({ count }) => `最多只能对比 ${count} 个模型`,
+    selectToInstall: '选择以安装',
     installed: '已安装',
     columns: {
       compare: '对比',
+      install: '获取',
       model: '模型',
       provider: '提供方',
       params: '参数量',

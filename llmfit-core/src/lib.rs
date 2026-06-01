@@ -6,6 +6,7 @@ pub mod models;
 pub mod plan;
 pub mod providers;
 pub mod quality;
+pub mod registry_yaml;
 pub mod update;
 
 pub use fit::{FitLevel, InferenceRuntime, ModelFit, RunMode, ScoreComponents, SortColumn};

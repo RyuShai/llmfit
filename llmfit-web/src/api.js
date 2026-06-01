@@ -157,6 +157,30 @@ export async function fetchDownloadStatus(id, signal) {
   return parseJsonOrThrow(response);
 }
 
+export async function startUpdate(signal) {
+  const response = await fetch('/api/v1/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal
+  });
+  return parseJsonOrThrow(response);
+}
+
+export async function fetchUpdateStatus(signal) {
+  const response = await fetch('/api/v1/update/status', { signal });
+  return parseJsonOrThrow(response);
+}
+
+export async function installModel(modelName, signal) {
+  const { id } = await startDownload(modelName, 'llamacpp', signal);
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const s = await fetchDownloadStatus(id, signal);
+    if (s.status === 'done') return { ok: true };
+    if (s.status === 'error') return { ok: false, error: s.message };
+  }
+}
+
 export async function fetchPlanEstimate(
   { model, context, quant, kv_quant, target_tps },
   simulation = {},

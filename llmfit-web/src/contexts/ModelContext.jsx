@@ -56,6 +56,14 @@ export function ModelProvider({ children }) {
 
   const simulationActive = Object.values(appliedSimulation).some((value) => value !== '');
 
+  const [selectedForInstall, setSelectedForInstall] = useState([]);
+  const toggleInstallSelect = useCallback((name) => {
+    setSelectedForInstall((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
+    );
+  }, []);
+  const clearInstallSelect = useCallback(() => setSelectedForInstall([]), []);
+
   const toggleCompare = useCallback((modelName) => {
     setCompareList((prev) => {
       if (prev.includes(modelName)) {
@@ -96,6 +104,9 @@ export function ModelProvider({ children }) {
     compareList,
     toggleCompare,
     clearCompare,
+    selectedForInstall,
+    toggleInstallSelect,
+    clearInstallSelect,
     installedModels,
     setInstalledModels,
     refreshTick,

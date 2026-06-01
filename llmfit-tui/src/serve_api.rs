@@ -32,10 +32,13 @@ struct AppState {
     node_name: String,
     os: String,
     specs: SystemSpecs,
-    models: Vec<LlmModel>,
+    /// Live model list — swappable after `/api/v1/update` rebuilds the catalog.
+    models: tokio::sync::RwLock<std::sync::Arc<Vec<LlmModel>>>,
     context_limit: Option<u32>,
     active_download: tokio::sync::RwLock<Option<ActiveDownload>>,
     download_counter: std::sync::atomic::AtomicU32,
+    active_update: tokio::sync::RwLock<Option<ActiveUpdate>>,
+    update_counter: std::sync::atomic::AtomicU32,
 }
 
 struct ActiveDownload {
@@ -45,6 +48,14 @@ struct ActiveDownload {
     status: String,
     progress_pct: f64,
     message: String,
+}
+
+struct ActiveUpdate {
+    id: String,
+    status: String,
+    message: String,
+    new_count: usize,
+    total_cached: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,10 +173,12 @@ pub fn run_serve(
         node_name,
         os: std::env::consts::OS.to_string(),
         specs,
-        models: all_models,
+        models: tokio::sync::RwLock::new(std::sync::Arc::new(all_models)),
         context_limit,
         active_download: tokio::sync::RwLock::new(None),
         download_counter: std::sync::atomic::AtomicU32::new(0),
+        active_update: tokio::sync::RwLock::new(None),
+        update_counter: std::sync::atomic::AtomicU32::new(0),
     });
 
     let app = build_router(state);
@@ -215,6 +228,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/installed", get(installed))
         .route("/api/v1/download", post(start_download))
         .route("/api/v1/download/{id}/status", get(download_status))
+        .route("/api/v1/update", post(start_update))
+        .route("/api/v1/update/status", get(update_status))
         .route("/api/v1/plan", post(plan_estimate))
         .route("/{*path}", get(spa_fallback))
         .with_state(state)
@@ -290,7 +305,11 @@ async fn models(
     Query(query): Query<ModelsQuery>,
 ) -> ApiResult<Json<ApiEnvelope>> {
     let specs = effective_specs(&state.specs, &query.hardware_overrides())?;
-    let mut fits = filtered_fits(&state, &specs, &query, false)?;
+    let models_snap = {
+        let guard = state.models.read().await;
+        std::sync::Arc::clone(&guard)
+    };
+    let mut fits = filtered_fits(&models_snap, state.context_limit, &specs, &query, false)?;
     let total_models = fits.len();
 
     let limit = query.limit.or(query.top).unwrap_or(usize::MAX);
@@ -318,7 +337,11 @@ async fn top_models(
     Query(query): Query<ModelsQuery>,
 ) -> ApiResult<Json<ApiEnvelope>> {
     let specs = effective_specs(&state.specs, &query.hardware_overrides())?;
-    let mut fits = filtered_fits(&state, &specs, &query, true)?;
+    let models_snap = {
+        let guard = state.models.read().await;
+        std::sync::Arc::clone(&guard)
+    };
+    let mut fits = filtered_fits(&models_snap, state.context_limit, &specs, &query, true)?;
     let total_models = fits.len();
 
     let limit = query.limit.or(query.top).unwrap_or(5);
@@ -350,7 +373,11 @@ async fn model_by_name(
     scoped.search = Some(name);
 
     let specs = effective_specs(&state.specs, &scoped.hardware_overrides())?;
-    let mut fits = filtered_fits(&state, &specs, &scoped, false)?;
+    let models_snap = {
+        let guard = state.models.read().await;
+        std::sync::Arc::clone(&guard)
+    };
+    let mut fits = filtered_fits(&models_snap, state.context_limit, &specs, &scoped, false)?;
     let total_models = fits.len();
 
     let limit = scoped.limit.or(scoped.top).unwrap_or(20);
@@ -667,6 +694,130 @@ async fn download_status(
     }
 }
 
+async fn start_update(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Update restricted to localhost",
+        ));
+    }
+
+    // Reject if one already running.
+    {
+        let u = state.active_update.read().await;
+        if let Some(ref a) = *u {
+            if a.status == "running" {
+                return Err(ApiError::bad_request(format!(
+                    "update '{}' already in progress",
+                    a.id
+                )));
+            }
+        }
+    }
+
+    let id = {
+        let n = state
+            .update_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("up-{n}")
+    };
+
+    {
+        let mut u = state.active_update.write().await;
+        *u = Some(ActiveUpdate {
+            id: id.clone(),
+            status: "running".to_string(),
+            message: "starting".to_string(),
+            new_count: 0,
+            total_cached: 0,
+        });
+    }
+
+    let state_bg = Arc::clone(&state);
+    let update_id = id.clone();
+
+    // update_model_cache is blocking (ureq network calls) — use spawn_blocking.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let opts = llmfit_core::update::UpdateOptions {
+            token: std::env::var("HF_TOKEN").ok(),
+            ..Default::default()
+        };
+        let result = llmfit_core::update::update_model_cache(&opts, |_msg| {});
+        let _ = tx.send(result);
+    });
+
+    tokio::task::spawn(async move {
+        let result = rx.await;
+        // Determine whether to rebuild the model snapshot.
+        let rebuild = {
+            let mut u = state_bg.active_update.write().await;
+            if let Some(ref mut a) = *u {
+                if a.id != update_id {
+                    return;
+                }
+                match result {
+                    Ok(Ok((new_count, total))) => {
+                        a.status = "done".to_string();
+                        a.message = "completed".to_string();
+                        a.new_count = new_count;
+                        a.total_cached = total;
+                        true // rebuild snapshot
+                    }
+                    Ok(Err(e)) => {
+                        a.status = "error".to_string();
+                        a.message = e;
+                        false
+                    }
+                    Err(_) => {
+                        a.status = "error".to_string();
+                        a.message = "update task cancelled".to_string();
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+            // active_update write lock is dropped here
+        };
+        if rebuild {
+            // Rebuild in-memory snapshot so new models are served immediately.
+            let fresh = llmfit_core::models::ModelDatabase::new()
+                .get_all_models()
+                .clone();
+            *state_bg.models.write().await = std::sync::Arc::new(fresh);
+        }
+    });
+
+    Ok(Json(serde_json::json!({ "id": id, "status": "running" })))
+}
+
+async fn update_status(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Update status restricted to localhost",
+        ));
+    }
+    let u = state.active_update.read().await;
+    match u.as_ref() {
+        Some(a) => Ok(Json(serde_json::json!({
+            "id": a.id,
+            "status": a.status,
+            "message": a.message,
+            "new_count": a.new_count,
+            "total_cached": a.total_cached,
+        }))),
+        None => Ok(Json(serde_json::json!({ "status": "idle" }))),
+    }
+}
+
 async fn plan_estimate(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -679,8 +830,11 @@ async fn plan_estimate(
         ));
     }
 
-    let model = state
-        .models
+    let models_snap = {
+        let guard = state.models.read().await;
+        std::sync::Arc::clone(&guard)
+    };
+    let model = models_snap
         .iter()
         .find(|m| m.name.eq_ignore_ascii_case(&body.model))
         .ok_or_else(|| ApiError::bad_request(format!("model '{}' not found", body.model)))?;
@@ -711,7 +865,8 @@ async fn plan_estimate(
 }
 
 fn filtered_fits(
-    state: &AppState,
+    models: &[LlmModel],
+    context_limit: Option<u32>,
     specs: &SystemSpecs,
     query: &ModelsQuery,
     top_only: bool,
@@ -721,10 +876,9 @@ fn filtered_fits(
     let runtime_filter = parse_runtime(query.runtime.as_deref())?;
     let use_case_filter = parse_use_case(query.use_case.as_deref())?;
 
-    let context_limit = query.max_context.or(state.context_limit);
+    let context_limit = query.max_context.or(context_limit);
     let forced_rt = parse_force_runtime(query.force_runtime.as_deref())?;
-    let mut fits: Vec<ModelFit> = state
-        .models
+    let mut fits: Vec<ModelFit> = models
         .iter()
         .filter(|m| backend_compatible(m, specs))
         .map(|m| ModelFit::analyze_with_forced_runtime(m, specs, context_limit, forced_rt))
@@ -974,10 +1128,14 @@ mod tests {
             node_name: "test-node".to_string(),
             os: "test-os".to_string(),
             specs: SystemSpecs::detect(),
-            models: db.get_all_models().clone(),
+            models: tokio::sync::RwLock::new(std::sync::Arc::new(
+                db.get_all_models().clone(),
+            )),
             context_limit: None,
             active_download: tokio::sync::RwLock::new(None),
             download_counter: std::sync::atomic::AtomicU32::new(0),
+            active_update: tokio::sync::RwLock::new(None),
+            update_counter: std::sync::atomic::AtomicU32::new(0),
         })
     }
 

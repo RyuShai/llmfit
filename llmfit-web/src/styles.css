@@ -926,6 +926,18 @@ tbody tr.selected {
   opacity: 0.4;
 }
 
+.col-install {
+  width: 36px;
+  text-align: center;
+}
+
+.install-checkbox {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 /* Installed badge */
 .chip-installed {
   display: inline-flex;
