@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { useI18n } from '../contexts/I18nContext';
 import { useModelContext, MAX_COMPARE } from '../contexts/ModelContext';
 import {
@@ -9,7 +8,6 @@ import {
   translateFitLevel,
   translateRunMode,
 } from '../utils';
-import { installModel } from '../api';
 
 export default function ModelTable() {
   const { locale, t } = useI18n();
@@ -24,43 +22,7 @@ export default function ModelTable() {
     installedModels,
     selectedForInstall,
     toggleInstallSelect,
-    clearInstallSelect,
-    triggerRefresh,
   } = useModelContext();
-
-  const [installing, setInstalling] = useState(false);
-  const [doneCount, setDoneCount] = useState(0);
-  const [installToast, setInstallToast] = useState(null);
-
-  function showInstallToast(kind, msg) {
-    setInstallToast({ kind, msg });
-    setTimeout(() => setInstallToast(null), 4000);
-  }
-
-  async function onInstall() {
-    setInstalling(true);
-    setDoneCount(0);
-    const names = [...selectedForInstall];
-    let done = 0;
-    const errors = [];
-    for (const name of names) {
-      const r = await installModel(name);
-      if (r.ok) {
-        done++;
-        setDoneCount(done);
-      } else {
-        errors.push(`${name}: ${r.error}`);
-      }
-    }
-    setInstalling(false);
-    clearInstallSelect();
-    if (errors.length) {
-      showInstallToast('error', t('models.installError', { errors: errors.join('; ') }));
-    } else {
-      showInstallToast('success', t('models.installDone', { count: done }));
-    }
-    triggerRefresh();
-  }
 
   const installedSet = new Set(
     Array.isArray(installedModels) ? installedModels : []
@@ -69,34 +31,11 @@ export default function ModelTable() {
 
   return (
     <div className="table-wrap">
-      {installToast && (
-        <div
-          className={`alert${installToast.kind === 'error' ? ' error' : ''}`}
-          role="status"
-          style={{ margin: '0.75rem 0.75rem 0 0.75rem' }}
-        >
-          {installToast.msg}
-        </div>
-      )}
-
       {error ? (
         <div role="alert" className="alert error" style={{ margin: '0.75rem' }}>
           {t('table.error', { error })}
         </div>
       ) : null}
-
-      <div style={{ padding: '0.5rem 0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-        <button
-          type="button"
-          disabled={installing || selectedForInstall.length === 0}
-          onClick={onInstall}
-          className="btn btn-accent"
-        >
-          {installing
-            ? t('models.installing', { done: doneCount, total: selectedForInstall.length + doneCount })
-            : t('models.installAction', { count: selectedForInstall.length })}
-        </button>
-      </div>
 
       <table>
         <thead>

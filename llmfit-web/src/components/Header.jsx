@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useFilterDispatch } from '../contexts/FilterContext';
 import { useI18n } from '../contexts/I18nContext';
 import { useModelContext } from '../contexts/ModelContext';
-import { startUpdate, fetchUpdateStatus } from '../api';
+import { startUpdate, fetchUpdateStatus, installModel } from '../api';
 
 const THEME_KEY = 'llmfit-theme';
 
@@ -46,8 +46,10 @@ export default function Header() {
   const { locale, setLocale, t } = useI18n();
   const [theme, setTheme] = useState(initialTheme);
   const dispatch = useFilterDispatch();
-  const { triggerRefresh } = useModelContext();
+  const { triggerRefresh, selectedForInstall, clearInstallSelect } = useModelContext();
   const [updating, setUpdating] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [doneCount, setDoneCount] = useState(0);
   const [toast, setToast] = useState(null);
 
   function showToast(kind, msg) {
@@ -77,6 +79,31 @@ export default function Header() {
     } finally {
       setUpdating(false);
     }
+  }
+
+  async function onInstall() {
+    setInstalling(true);
+    setDoneCount(0);
+    const names = [...selectedForInstall];
+    let done = 0;
+    const errors = [];
+    for (const name of names) {
+      const r = await installModel(name);
+      if (r.ok) {
+        done++;
+        setDoneCount(done);
+      } else {
+        errors.push(`${name}: ${r.error}`);
+      }
+    }
+    setInstalling(false);
+    clearInstallSelect();
+    if (errors.length) {
+      showToast('error', t('models.installError', { errors: errors.join('; ') }));
+    } else {
+      showToast('success', t('models.installDone', { count: done }));
+    }
+    triggerRefresh();
   }
 
   useEffect(() => {
@@ -124,6 +151,16 @@ export default function Header() {
           className="btn btn-accent"
         >
           {t('header.refresh')}
+        </button>
+        <button
+          type="button"
+          disabled={installing || selectedForInstall.length === 0}
+          onClick={onInstall}
+          className="btn btn-accent"
+        >
+          {installing
+            ? t('models.installing', { done: doneCount, total: selectedForInstall.length + doneCount })
+            : t('models.installAction', { count: selectedForInstall.length })}
         </button>
         <select
           value={locale}
