@@ -26,8 +26,9 @@ export function useModels() {
       setError('');
       try {
         const payload = await fetchModels(filters, appliedSimulation, controller.signal);
-        // Drop models that can't run on an NVIDIA GPU via llama.cpp/GGUF
-        // (MXFP4/AWQ/GPTQ/FP8/MLX/EXL2/bnb) before any other processing.
+        // Drop only models tied to non-NVIDIA hardware (AMD-only MXFP4,
+        // Apple-only MLX). NVIDIA-runnable formats (GGUF/AWQ/GPTQ/FP8/EXL2/…)
+        // are kept — the limit is the hardware, not the llama.cpp framework.
         const fetchedModels = excludeNonNvidia(
           Array.isArray(payload.models) ? payload.models : []
         );

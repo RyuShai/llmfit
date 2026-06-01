@@ -5,15 +5,18 @@ export function round(value, digits = 1) {
   return value.toFixed(digits);
 }
 
-// Formats that cannot run on an NVIDIA GPU via the llama.cpp / GGUF stack:
-//   MXFP4 (AMD Quark, ROCm-only) | AWQ / GPTQ / FP8 (need vLLM/TRT-LLM) |
-//   MLX (Apple-only) | EXL2 (ExLlama) | bitsandbytes int4/int8/nf4.
-const NON_NVIDIA_FORMAT_RE =
-  /(mxfp4|\bawq\b|\bgptq\b|\bfp8\b|\bmlx\b|mlx-community|exl2|exllama|\bint4\b|\bint8\b|\bnf4\b|\bbnb\b)/i;
+// Hardware-based filter (NOT framework-based): only drop formats that CANNOT
+// run on this NVIDIA GPU under ANY runtime —
+//   MXFP4  → AMD Quark, ROCm/Instinct only; no NVIDIA path.
+//   MLX / CoreML → Apple-Silicon only.
+// Everything that an NVIDIA card CAN run via some engine is KEPT, even if it is
+// not llama.cpp/GGUF: AWQ, GPTQ, FP8, EXL2, bitsandbytes int4/int8/nf4 all run
+// on NVIDIA via vLLM / ExLlama / TensorRT-LLM. (NVFP4 is NVIDIA-native, kept.)
+const NON_NVIDIA_FORMAT_RE = /(mxfp4|\bmlx\b|mlx-community|coreml)/i;
 
-// A catalog model is NVIDIA-runnable if its name doesn't advertise a non-GGUF /
-// non-NVIDIA quant format. (Base / GGUF repos pass; a GGUF build can then be
-// resolved for them.)
+// A catalog model is kept if its name doesn't advertise a format tied to
+// non-NVIDIA hardware (AMD-only MXFP4 / Apple-only MLX). Base, GGUF, and the
+// NVIDIA-runnable quant formats (AWQ/GPTQ/FP8/EXL2/…) all pass.
 export function isNvidiaRunnable(model) {
   const name = (model && model.name) || '';
   return !NON_NVIDIA_FORMAT_RE.test(name);
