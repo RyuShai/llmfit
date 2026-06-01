@@ -817,8 +817,11 @@ impl LlamaCppProvider {
     /// Search HuggingFace for GGUF repositories matching a query.
     /// Returns a list of (repo_id, description) tuples.
     pub fn search_hf_gguf(query: &str) -> Vec<(String, String)> {
+        // NOTE: the HF API rejects `sort=trending` ("Invalid sort parameter");
+        // use `sort=downloads` to surface the most-downloaded (most reliable)
+        // GGUF repos first.
         let url = format!(
-            "https://huggingface.co/api/models?library=gguf&search={}&sort=trending&limit=20",
+            "https://huggingface.co/api/models?library=gguf&search={}&sort=downloads&limit=20",
             urlencoding::encode(query)
         );
         let Ok(resp) = ureq::get(&url)
@@ -1437,6 +1440,32 @@ mod urlencoding {
     }
 }
 
+/// Derive a clean HuggingFace search term for locating a GGUF build of a model.
+/// Takes the base name after the last '/', then strips common non-GGUF format /
+/// quant suffixes, e.g. "amd/Qwen3.5-35B-A3B-MXFP4" → "Qwen3.5-35B-A3B".
+fn gguf_search_term(model_tag: &str) -> String {
+    let base = model_tag.rsplit('/').next().unwrap_or(model_tag);
+    let mut s = base.to_string();
+    loop {
+        let lower = s.to_lowercase();
+        let mut stripped = false;
+        for suf in [
+            "-gguf", "-mxfp4", "-awq", "-gptq", "-int8", "-int4", "-fp8", "-fp16",
+            "-bf16", "-8bit", "-4bit",
+        ] {
+            if lower.ends_with(suf) {
+                s.truncate(s.len() - suf.len());
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    s
+}
+
 impl ModelProvider for LlamaCppProvider {
     fn name(&self) -> &str {
         "llama.cpp"
@@ -1467,40 +1496,41 @@ impl ModelProvider for LlamaCppProvider {
             }
         }
 
-        // If it looks like a repo (org/name), list files and pick the best
+        // If it looks like a repo (org/name) that itself holds GGUF files, use it.
         if model_tag.contains('/') {
             let files = Self::list_repo_gguf_files(model_tag);
-            if files.is_empty() {
-                return Err(format!("No GGUF files found in repository '{}'", model_tag));
-            }
-            // Pick a reasonable default (Q4_K_M or similar)
-            if let Some((filename, _)) = Self::select_best_gguf(&files, 999.0) {
+            if !files.is_empty() {
+                let filename = Self::select_best_gguf(&files, 999.0)
+                    .map(|(f, _)| f)
+                    .unwrap_or_else(|| files[0].0.clone());
                 return self.download_gguf(model_tag, &filename);
             }
-            // Fallback: just pick the first
-            let (filename, _) = &files[0];
-            return self.download_gguf(model_tag, filename);
+            // The named repo has no GGUF (e.g. a safetensors / MXFP4 / AWQ repo).
+            // Fall through to an HF GGUF search by the base model name so a
+            // community GGUF build (bartowski / unsloth / …) can be installed.
         }
 
-        // Otherwise, search HuggingFace for GGUF repos
-        let results = Self::search_hf_gguf(model_tag);
-        if results.is_empty() {
-            return Err(format!(
-                "No GGUF models found on HuggingFace for '{}'",
-                model_tag
-            ));
-        }
-        // Use the first result
-        let (repo_id, _) = &results[0];
-        let files = Self::list_repo_gguf_files(repo_id);
-        if files.is_empty() {
-            return Err(format!("No GGUF files found in repository '{}'", repo_id));
-        }
-        if let Some((filename, _)) = Self::select_best_gguf(&files, 999.0) {
+        // Search HuggingFace for a GGUF build, using a cleaned base-name term.
+        // Iterate the (download-sorted) results and use the first repo that
+        // actually contains GGUF files — the top hit is sometimes the original
+        // (non-GGUF) repo merely tagged with the gguf library.
+        let search_term = gguf_search_term(model_tag);
+        let results = Self::search_hf_gguf(&search_term);
+        for (repo_id, _) in &results {
+            let files = Self::list_repo_gguf_files(repo_id);
+            if files.is_empty() {
+                continue;
+            }
+            let filename = Self::select_best_gguf(&files, 999.0)
+                .map(|(f, _)| f)
+                .unwrap_or_else(|| files[0].0.clone());
             return self.download_gguf(repo_id, &filename);
         }
-        let (filename, _) = &files[0];
-        self.download_gguf(repo_id, filename)
+        Err(format!(
+            "No GGUF build found to download for '{}'. This model may only be \
+             published in non-GGUF formats (safetensors / MXFP4 / AWQ / GPTQ).",
+            model_tag
+        ))
     }
 }
 
