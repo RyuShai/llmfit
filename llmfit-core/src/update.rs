@@ -303,6 +303,18 @@ fn estimate_ram(
 
 // ── HF config.json fetching ───────────────────────────────────────────────────
 
+/// Subset of `quantization_config` from a model's `config.json`.
+/// Covers compressed-tensors, AWQ, GPTQ, FP8, ModelOpt, etc.
+#[derive(Deserialize, Debug, Default)]
+struct QuantizationConfig {
+    /// e.g. "compressed-tensors", "awq", "gptq", "fp8", "modelopt"
+    #[serde(default)]
+    quant_method: Option<String>,
+    /// compressed-tensors sub-format: "nvfp4", "float-quantized", etc.
+    #[serde(default)]
+    format: Option<String>,
+}
+
 /// Subset of fields we read from a model's `config.json`. Everything is
 /// optional because configs vary wildly across architectures.
 #[derive(Deserialize, Debug, Default)]
@@ -338,6 +350,9 @@ struct HfConfig {
     // Nested config (Qwen3.5 vision+text models store LLM params under text_config)
     #[serde(default)]
     text_config: Option<Box<HfConfig>>,
+    // Quantization metadata — used to detect vLLM-only formats
+    #[serde(default)]
+    quantization_config: Option<QuantizationConfig>,
 }
 
 /// Fetch a model's `config.json` from the HuggingFace resolve endpoint.
@@ -377,6 +392,106 @@ fn resolve_head_dim(cfg: &HfConfig) -> Option<u32> {
         return None;
     }
     Some(hidden / heads)
+}
+
+// ── Format detection ─────────────────────────────────────────────────────────
+
+/// Detect the `ModelFormat` for a HuggingFace model.
+///
+/// Priority order:
+/// 1. `quantization_config.quant_method` from config.json — authoritative.
+/// 2. Heuristics on repo_id and tags — best-effort when config is absent.
+/// 3. Default: `Gguf`.
+///
+/// The heuristic for "-vllm" in repo names is intentionally broad: any repo
+/// that advertises itself as vLLM-specific and does not match a known GGUF
+/// pattern is classified as CompressedTensors (the dominant vLLM-only family).
+fn detect_format(repo_id: &str, tags: &[String], cfg: Option<&HfConfig>) -> ModelFormat {
+    use crate::models::ModelFormat;
+
+    // 1. Authoritative: quantization_config.quant_method from config.json.
+    //    Check top-level first, then nested text_config.
+    let qc = cfg.and_then(|c| {
+        c.quantization_config
+            .as_ref()
+            .or_else(|| c.text_config.as_deref().and_then(|tc| tc.quantization_config.as_ref()))
+    });
+
+    if let Some(qc) = qc {
+        let method = qc
+            .quant_method
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase();
+        let fmt = qc.format.as_deref().unwrap_or("").to_lowercase();
+
+        if method == "compressed-tensors"
+            || method == "modelopt"
+            || method.contains("fp4")
+            || method.contains("nvfp4")
+            || method.contains("fp8")
+            || fmt.contains("fp4")
+            || fmt.contains("nvfp4")
+            || fmt.contains("fp8")
+        {
+            return ModelFormat::CompressedTensors;
+        }
+        if method == "awq" {
+            return ModelFormat::Awq;
+        }
+        if method == "gptq" {
+            return ModelFormat::Gptq;
+        }
+        if method == "autoround" || method == "auto-round" || method.contains("auto_round") {
+            return ModelFormat::Autoround;
+        }
+    }
+
+    // 2. Heuristics on repo_id and tags (case-insensitive).
+    let id_lower = repo_id.to_lowercase();
+    let tags_lower: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+    let in_tags = |needle: &str| tags_lower.iter().any(|t| t.contains(needle));
+
+    // Check explicit GGUF markers first so they are not mis-classified.
+    if id_lower.contains("gguf") || in_tags("gguf") {
+        return ModelFormat::Gguf;
+    }
+    if id_lower.contains("mlx") || in_tags("mlx") {
+        return ModelFormat::Mlx;
+    }
+
+    // compressed-tensors / PrismaQuant / NVFP4 / FP4 signals
+    if id_lower.contains("nvfp4")
+        || id_lower.contains("fp4")
+        || id_lower.contains("compressed-tensors")
+        || id_lower.contains("prismaquant")
+        || in_tags("compressed-tensors")
+        || in_tags("nvfp4")
+        || in_tags("fp4")
+    {
+        return ModelFormat::CompressedTensors;
+    }
+
+    // "-vllm" suffix is a common convention for vLLM-only quantized repos
+    // (e.g. "...-4.75bit-vllm"). Treat as CompressedTensors when no other
+    // format marker is present.
+    if id_lower.ends_with("-vllm") || id_lower.contains("-vllm-") {
+        return ModelFormat::CompressedTensors;
+    }
+
+    if id_lower.contains("awq") || in_tags("awq") {
+        return ModelFormat::Awq;
+    }
+    if id_lower.contains("gptq") || in_tags("gptq") {
+        return ModelFormat::Gptq;
+    }
+    if (id_lower.contains("autoround") || id_lower.contains("auto-round")) || in_tags("autoround")
+    {
+        return ModelFormat::Autoround;
+    }
+
+    // 3. Default
+    ModelFormat::Gguf
 }
 
 // ── HF API fetching ───────────────────────────────────────────────────────────
@@ -563,7 +678,7 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
         release_date,
         gguf_sources: vec![],
         capabilities: vec![],
-        format: ModelFormat::default(),
+        format: detect_format(&hf.id, &hf.tags, cfg.as_ref()),
         num_attention_heads,
         num_key_value_heads,
         num_hidden_layers,

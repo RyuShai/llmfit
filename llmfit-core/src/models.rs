@@ -382,16 +382,44 @@ pub enum ModelFormat {
     Autoround,
     Mlx,
     Safetensors,
+    /// compressed-tensors family: NVFP4, MXFP8, FP8, PrismaQuant, etc.
+    /// These are vLLM-only and cannot be loaded by llama.cpp.
+    #[serde(rename = "compressed-tensors")]
+    CompressedTensors,
 }
 
 impl ModelFormat {
     /// Returns true for formats that are pre-quantized at a fixed bit width
-    /// and cannot be dynamically re-quantized (AWQ, GPTQ, AutoRound).
+    /// and cannot be dynamically re-quantized (AWQ, GPTQ, AutoRound,
+    /// CompressedTensors).
     pub fn is_prequantized(&self) -> bool {
         matches!(
             self,
-            ModelFormat::Awq | ModelFormat::Gptq | ModelFormat::Autoround
+            ModelFormat::Awq
+                | ModelFormat::Gptq
+                | ModelFormat::Autoround
+                | ModelFormat::CompressedTensors
         )
+    }
+
+    /// Returns true when this format can ONLY run on vLLM.
+    /// Supertype of is_prequantized() — all vLLM-only formats are also
+    /// prequantized, but AWQ/GPTQ/AutoRound can also run on other CUDA
+    /// runtimes whereas CompressedTensors is strictly vLLM.
+    pub fn requires_vllm(&self) -> bool {
+        matches!(
+            self,
+            ModelFormat::Awq
+                | ModelFormat::Gptq
+                | ModelFormat::Autoround
+                | ModelFormat::CompressedTensors
+        )
+    }
+
+    /// Returns true when llama.cpp can load this format natively.
+    /// Safetensors is treated as convertible (existing behavior preserved).
+    pub fn loadable_by_llama_cpp(&self) -> bool {
+        matches!(self, ModelFormat::Gguf | ModelFormat::Safetensors)
     }
 }
 
@@ -2374,9 +2402,32 @@ mod tests {
         assert!(ModelFormat::Awq.is_prequantized());
         assert!(ModelFormat::Gptq.is_prequantized());
         assert!(ModelFormat::Autoround.is_prequantized());
+        assert!(ModelFormat::CompressedTensors.is_prequantized());
         assert!(!ModelFormat::Gguf.is_prequantized());
         assert!(!ModelFormat::Mlx.is_prequantized());
         assert!(!ModelFormat::Safetensors.is_prequantized());
+    }
+
+    #[test]
+    fn test_model_format_requires_vllm() {
+        assert!(ModelFormat::CompressedTensors.requires_vllm());
+        assert!(ModelFormat::Awq.requires_vllm());
+        assert!(ModelFormat::Gptq.requires_vllm());
+        assert!(ModelFormat::Autoround.requires_vllm());
+        assert!(!ModelFormat::Gguf.requires_vllm());
+        assert!(!ModelFormat::Mlx.requires_vllm());
+        assert!(!ModelFormat::Safetensors.requires_vllm());
+    }
+
+    #[test]
+    fn test_model_format_loadable_by_llama_cpp() {
+        assert!(ModelFormat::Gguf.loadable_by_llama_cpp());
+        assert!(ModelFormat::Safetensors.loadable_by_llama_cpp());
+        assert!(!ModelFormat::CompressedTensors.loadable_by_llama_cpp());
+        assert!(!ModelFormat::Awq.loadable_by_llama_cpp());
+        assert!(!ModelFormat::Gptq.loadable_by_llama_cpp());
+        assert!(!ModelFormat::Autoround.loadable_by_llama_cpp());
+        assert!(!ModelFormat::Mlx.loadable_by_llama_cpp());
     }
 
     // ────────────────────────────────────────────────────────────────────
