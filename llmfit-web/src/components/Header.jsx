@@ -46,7 +46,7 @@ export default function Header() {
   const { locale, setLocale, t } = useI18n();
   const [theme, setTheme] = useState(initialTheme);
   const dispatch = useFilterDispatch();
-  const { triggerRefresh, selectedForInstall, clearInstallSelect } = useModelContext();
+  const { models, triggerRefresh, selectedForInstall, clearInstallSelect } = useModelContext();
   const [updating, setUpdating] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [doneCount, setDoneCount] = useState(0);
@@ -88,7 +88,12 @@ export default function Header() {
     let done = 0;
     const errors = [];
     for (const name of names) {
-      const r = await installModel(name);
+      // Pass the displayed best_quant + VRAM budget so the install matches the UI.
+      const m = models.find((x) => x.name === name);
+      const opts = m
+        ? { quant: m.best_quant, vramGb: m.memory_available_gb }
+        : {};
+      const r = await installModel(name, opts);
       if (r.ok) {
         done++;
         setDoneCount(done);

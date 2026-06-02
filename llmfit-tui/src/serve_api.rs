@@ -404,6 +404,14 @@ async fn model_by_name(
 struct DownloadBody {
     model: String,
     runtime: String,
+    /// The fit's recommended quant ("Best quantization for hardware", e.g.
+    /// `Q6_K`). When present, the llama.cpp install prefers a matching GGUF.
+    #[serde(default)]
+    quant: Option<String>,
+    /// VRAM budget (GB) used to pick the best-fitting quant when the exact
+    /// recommended quant is not published.
+    #[serde(default)]
+    vram_gb: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -577,6 +585,8 @@ async fn start_download(
     let download_id = id.clone();
     let model_name = body.model.clone();
     let runtime = body.runtime.clone();
+    let quant = body.quant.clone();
+    let vram_gb = body.vram_gb;
     let state_bg = Arc::clone(&state);
 
     // Use a tokio mpsc channel to relay PullEvents from the blocking thread
@@ -588,7 +598,9 @@ async fn start_download(
         let handle_result = match runtime.as_str() {
             "ollama" => OllamaProvider::new().start_pull(&model_name),
             "mlx" => MlxProvider::new().start_pull(&model_name),
-            "llamacpp" => LlamaCppProvider::new().start_pull(&model_name),
+            "llamacpp" => {
+                LlamaCppProvider::new().start_pull_with_quant(&model_name, quant.as_deref(), vram_gb)
+            }
             "docker_model_runner" => DockerModelRunnerProvider::new().start_pull(&model_name),
             "lmstudio" => LmStudioProvider::new().start_pull(&model_name),
             "vllm" => VllmProvider::new().start_pull(&model_name),

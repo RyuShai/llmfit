@@ -142,11 +142,20 @@ export async function fetchInstalled(signal) {
   return parseJsonOrThrow(response);
 }
 
-export async function startDownload(model, runtime, signal) {
+export async function startDownload(model, runtime, opts = {}, signal) {
+  const body = { model, runtime };
+  // Forward the fit's recommended quant + VRAM budget so the install picks the
+  // GGUF that matches the displayed "Best quantization for hardware".
+  if (opts.quant) {
+    body.quant = opts.quant;
+  }
+  if (typeof opts.vramGb === 'number' && Number.isFinite(opts.vramGb)) {
+    body.vram_gb = opts.vramGb;
+  }
   const response = await fetch('/api/v1/download', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, runtime }),
+    body: JSON.stringify(body),
     signal
   });
   return parseJsonOrThrow(response);
@@ -171,8 +180,8 @@ export async function fetchUpdateStatus(signal) {
   return parseJsonOrThrow(response);
 }
 
-export async function installModel(modelName, signal) {
-  const { id } = await startDownload(modelName, 'llamacpp', signal);
+export async function installModel(modelName, opts = {}, signal) {
+  const { id } = await startDownload(modelName, 'llamacpp', opts, signal);
   for (;;) {
     await new Promise((r) => setTimeout(r, 1500));
     const s = await fetchDownloadStatus(id, signal);

@@ -1488,6 +1488,47 @@ fn select_preferred_gguf(files: &[(String, u64)]) -> Option<String> {
     files.iter().min_by_key(|(_, s)| *s).map(|(f, _)| f.clone())
 }
 
+/// Choose which GGUF file to download for a model, honouring the fit's
+/// recommendation so the install matches what the UI displays.
+///
+/// Priority:
+/// 1. **Exact `preferred_quant` match** — the quant the fit recommended
+///    ("Best quantization for hardware", e.g. `Q6_K`). Guarantees the
+///    downloaded file matches the displayed best_quant when the repo
+///    publishes it.
+/// 2. **Budget-aware** — highest-quality quant whose file fits `vram_budget_gb`
+///    (`select_best_gguf`), used when the exact quant is not published.
+/// 3. **Fallback** — `select_preferred_gguf` (hardware-friendly 4-bit default).
+fn choose_gguf(
+    files: &[(String, u64)],
+    preferred_quant: Option<&str>,
+    vram_budget_gb: Option<f64>,
+) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    // 1. Exact match to the fit's recommended quant (case-insensitive substring).
+    //    Non-GGUF labels (e.g. "compressed-tensors (~4.75bit)") simply won't
+    //    match any GGUF filename and fall through.
+    if let Some(q) = preferred_quant {
+        let ql = q.trim().to_lowercase();
+        if !ql.is_empty()
+            && let Some((f, _)) = files.iter().find(|(name, _)| name.to_lowercase().contains(&ql))
+        {
+            return Some(f.clone());
+        }
+    }
+    // 2. Highest-quality quant whose file fits the VRAM budget.
+    if let Some(budget) = vram_budget_gb
+        && budget > 0.0
+        && let Some((f, _)) = LlamaCppProvider::select_best_gguf(files, budget)
+    {
+        return Some(f);
+    }
+    // 3. Hardware-friendly default.
+    select_preferred_gguf(files)
+}
+
 /// Ranking key for choosing among GGUF search results: lower = preferred.
 /// Trusted/official quantizers float to the top; fine-tune red-flags sink.
 fn repo_rank(repo_id: &str) -> i32 {
@@ -1527,12 +1568,29 @@ impl ModelProvider for LlamaCppProvider {
     }
 
     fn start_pull(&self, model_tag: &str) -> Result<PullHandle, String> {
+        // Default install path: no quant preference and no VRAM budget — keeps
+        // the hardware-friendly 4-bit default for callers that don't pass them.
+        self.start_pull_with_quant(model_tag, None, None)
+    }
+}
+
+impl LlamaCppProvider {
+    /// Like `start_pull`, but honours the fit's recommended quant and VRAM
+    /// budget so the downloaded GGUF matches the UI's "Best quantization for
+    /// hardware" value (via [`choose_gguf`]).
+    pub fn start_pull_with_quant(
+        &self,
+        model_tag: &str,
+        preferred_quant: Option<&str>,
+        vram_budget_gb: Option<f64>,
+    ) -> Result<PullHandle, String> {
         // model_tag can be:
         // 1. A HuggingFace repo ID like "bartowski/Llama-3.1-8B-Instruct-GGUF"
         // 2. A repo_id/filename like "bartowski/Llama-3.1-8B-Instruct-GGUF/Q4_K_M.gguf"
         // 3. A short search term like "llama-3.1-8b"
 
-        // If it contains a slash and ends with .gguf, treat as repo/file
+        // If it contains a slash and ends with .gguf, treat as repo/file — an
+        // explicit file always wins over any quant preference.
         if model_tag.matches('/').count() >= 2 && model_tag.ends_with(".gguf") {
             let parts: Vec<&str> = model_tag.splitn(3, '/').collect();
             if parts.len() == 3 {
@@ -1546,7 +1604,7 @@ impl ModelProvider for LlamaCppProvider {
         if model_tag.contains('/') {
             let files = Self::list_repo_gguf_files(model_tag);
             if !files.is_empty() {
-                let filename = select_preferred_gguf(&files)
+                let filename = choose_gguf(&files, preferred_quant, vram_budget_gb)
                     .unwrap_or_else(|| files[0].0.clone());
                 return self.download_gguf(model_tag, &filename);
             }
@@ -1559,7 +1617,7 @@ impl ModelProvider for LlamaCppProvider {
         // Rank results so trusted/official quantizers (unsloth, bartowski, the
         // model's own org, …) are tried before random community fine-tunes
         // (uncensored/abliterated/…), then use the first repo with GGUF files and
-        // pick a hardware-friendly quant (4-bit) rather than the largest file.
+        // pick the quant that matches the fit recommendation (or fits VRAM).
         let search_term = gguf_search_term(model_tag);
         let mut results = Self::search_hf_gguf(&search_term);
         results.sort_by_key(|(repo, _)| repo_rank(repo)); // stable: keeps HF download order within a rank
@@ -1568,7 +1626,7 @@ impl ModelProvider for LlamaCppProvider {
             if files.is_empty() {
                 continue;
             }
-            if let Some(filename) = select_preferred_gguf(&files) {
+            if let Some(filename) = choose_gguf(&files, preferred_quant, vram_budget_gb) {
                 return self.download_gguf(repo_id, &filename);
             }
         }
@@ -3876,6 +3934,42 @@ mod tests {
         assert!(result.is_some());
         let (name, _) = result.unwrap();
         assert!(name.contains("Q8_0"), "should prefer Q8, got: {}", name);
+    }
+
+    #[test]
+    fn test_choose_gguf_prefers_exact_recommended_quant() {
+        let files = vec![
+            ("model-Q4_K_M.gguf".to_string(), 4_000_000_000u64),
+            ("model-Q6_K.gguf".to_string(), 6_000_000_000u64),
+            ("model-Q8_0.gguf".to_string(), 8_000_000_000u64),
+        ];
+        // Fit recommended Q6_K → install must pick Q6_K, even though the default
+        // picker would grab Q4_K_M and the budget picker would grab Q8_0.
+        let r = choose_gguf(&files, Some("Q6_K"), Some(100.0));
+        assert_eq!(r.as_deref(), Some("model-Q6_K.gguf"));
+    }
+
+    #[test]
+    fn test_choose_gguf_budget_fallback_when_quant_missing() {
+        let files = vec![
+            ("model-Q2_K.gguf".to_string(), 2_000_000_000u64),
+            ("model-Q4_K_M.gguf".to_string(), 4_000_000_000u64),
+            ("model-Q8_0.gguf".to_string(), 8_000_000_000u64),
+        ];
+        // Recommended Q6_K not published → highest quality fitting ~5 GB = Q4_K_M.
+        let r = choose_gguf(&files, Some("Q6_K"), Some(5.0));
+        assert_eq!(r.as_deref(), Some("model-Q4_K_M.gguf"));
+    }
+
+    #[test]
+    fn test_choose_gguf_default_when_no_hints() {
+        let files = vec![
+            ("model-Q4_K_M.gguf".to_string(), 4_000_000_000u64),
+            ("model-Q8_0.gguf".to_string(), 8_000_000_000u64),
+        ];
+        // No quant + no budget → hardware-friendly default (Q4_K_M first).
+        let r = choose_gguf(&files, None, None);
+        assert_eq!(r.as_deref(), Some("model-Q4_K_M.gguf"));
     }
 
     #[test]
