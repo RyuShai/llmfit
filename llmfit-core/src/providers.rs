@@ -1488,17 +1488,42 @@ fn select_preferred_gguf(files: &[(String, u64)]) -> Option<String> {
     files.iter().min_by_key(|(_, s)| *s).map(|(f, _)| f.clone())
 }
 
+/// Approximate bits-per-weight of a GGUF file, derived from the quant tag in
+/// its filename. Used as a quality/size proxy. Unknown tags fall back to the
+/// `quant_bpp` default (~Q4).
+fn gguf_file_bpp(filename: &str) -> f64 {
+    // Most specific tags first so e.g. a `Q5_K_M` file is not matched as `Q5`.
+    const TAGS: &[&str] = &[
+        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_0", "Q3_K_M", "Q3_K_S",
+        "Q2_K",
+    ];
+    let lower = filename.to_lowercase();
+    for t in TAGS {
+        if lower.contains(&t.to_lowercase()) {
+            return crate::models::quant_bpp(t);
+        }
+    }
+    // IQ-quants and anything unrecognized: treat as ~4-bit (same as quant_bpp's
+    // own fallback) so they're comparable on the bpp scale.
+    crate::models::quant_bpp("Q4_K_M")
+}
+
 /// Choose which GGUF file to download for a model, honouring the fit's
-/// recommendation so the install matches what the UI displays.
+/// recommendation so the install matches what the UI displays — and never
+/// exceeds it (which would risk an out-of-VRAM load once the KV cache is added).
 ///
-/// Priority:
-/// 1. **Exact `preferred_quant` match** — the quant the fit recommended
-///    ("Best quantization for hardware", e.g. `Q6_K`). Guarantees the
-///    downloaded file matches the displayed best_quant when the repo
-///    publishes it.
-/// 2. **Budget-aware** — highest-quality quant whose file fits `vram_budget_gb`
-///    (`select_best_gguf`), used when the exact quant is not published.
-/// 3. **Fallback** — `select_preferred_gguf` (hardware-friendly 4-bit default).
+/// Priority when the fit's recommended quant (`preferred_quant`, e.g. `Q6_K`) is
+/// known:
+/// 1. **Exact match** — the recommended quant, if the repo publishes it.
+/// 2. **KV-safe tier** — the highest-quality file whose bits-per-weight does
+///    NOT exceed the recommendation. The recommended quant already fits VRAM
+///    *including* the KV cache + runtime overhead, so any tier at or below it
+///    also fits; a higher tier might not. This is the tight, KV-aware fallback.
+/// 3. **All higher** — if every published quant is heavier than recommended,
+///    take the smallest (lowest-bpw) file as the safest choice.
+///
+/// When no recommendation is available (e.g. a CLI caller), fall back to the
+/// budget-aware `select_best_gguf`, then the hardware-friendly default.
 fn choose_gguf(
     files: &[(String, u64)],
     preferred_quant: Option<&str>,
@@ -1507,25 +1532,42 @@ fn choose_gguf(
     if files.is_empty() {
         return None;
     }
-    // 1. Exact match to the fit's recommended quant (case-insensitive substring).
-    //    Non-GGUF labels (e.g. "compressed-tensors (~4.75bit)") simply won't
-    //    match any GGUF filename and fall through.
+
     if let Some(q) = preferred_quant {
-        let ql = q.trim().to_lowercase();
-        if !ql.is_empty()
-            && let Some((f, _)) = files.iter().find(|(name, _)| name.to_lowercase().contains(&ql))
-        {
-            return Some(f.clone());
+        let q = q.trim();
+        let ql = q.to_lowercase();
+        // Non-GGUF labels (e.g. "compressed-tensors (~4.75bit)") won't match a
+        // GGUF tag; ql stays usable only for genuine quant strings.
+        if !ql.is_empty() {
+            // 1. Exact recommended quant.
+            if let Some((f, _)) = files.iter().find(|(name, _)| name.to_lowercase().contains(&ql)) {
+                return Some(f.clone());
+            }
+            // 2. KV-safe: best tier at or below the recommendation (epsilon for
+            //    float compare).
+            let ceiling = crate::models::quant_bpp(q);
+            if let Some((f, _)) = files
+                .iter()
+                .filter(|(name, _)| gguf_file_bpp(name) <= ceiling + 0.001)
+                .max_by(|a, b| gguf_file_bpp(&a.0).total_cmp(&gguf_file_bpp(&b.0)))
+            {
+                return Some(f.clone());
+            }
+            // 3. Everything published is heavier than recommended → smallest file.
+            if let Some((f, _)) = files.iter().min_by_key(|(_, size)| *size) {
+                return Some(f.clone());
+            }
         }
     }
-    // 2. Highest-quality quant whose file fits the VRAM budget.
+
+    // No usable recommendation: highest quality that fits the raw VRAM budget.
     if let Some(budget) = vram_budget_gb
         && budget > 0.0
         && let Some((f, _)) = LlamaCppProvider::select_best_gguf(files, budget)
     {
         return Some(f);
     }
-    // 3. Hardware-friendly default.
+    // Hardware-friendly default.
     select_preferred_gguf(files)
 }
 
@@ -3947,6 +3989,20 @@ mod tests {
         // picker would grab Q4_K_M and the budget picker would grab Q8_0.
         let r = choose_gguf(&files, Some("Q6_K"), Some(100.0));
         assert_eq!(r.as_deref(), Some("model-Q6_K.gguf"));
+    }
+
+    #[test]
+    fn test_choose_gguf_never_exceeds_recommended_tier() {
+        let files = vec![
+            ("model-Q4_K_M.gguf".to_string(), 4_000_000_000u64),
+            ("model-Q6_K.gguf".to_string(), 6_000_000_000u64),
+            ("model-Q8_0.gguf".to_string(), 8_000_000_000u64),
+        ];
+        // Recommended Q5_K_M isn't published. Even with a huge VRAM budget the
+        // install must NOT jump up to Q6_K/Q8_0 (they add KV-cache pressure and
+        // could OOM); it picks the best tier at-or-below the recommendation.
+        let r = choose_gguf(&files, Some("Q5_K_M"), Some(100.0));
+        assert_eq!(r.as_deref(), Some("model-Q4_K_M.gguf"));
     }
 
     #[test]
