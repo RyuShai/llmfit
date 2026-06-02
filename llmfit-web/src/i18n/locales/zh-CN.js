@@ -72,7 +72,8 @@ const zhCN = {
     installAction: ({ count }) => `安装（${count}）`,
     installing: ({ done, total }) => `安装中 ${done}/${total}…`,
     installDone: ({ count }) => `已安装 ${count} 个模型`,
-    installError: ({ errors }) => `部分安装失败：${errors}`
+    installError: ({ errors }) => `部分安装失败：${errors}`,
+    installProgress: ({ model, done, total }) => `正在安装 ${model}（${done}/${total}）`
   },
   filters: {
     searchLabel: '搜索',

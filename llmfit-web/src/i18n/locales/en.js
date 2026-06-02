@@ -72,7 +72,8 @@ const en = {
     installAction: ({ count }) => `Install (${count})`,
     installing: ({ done, total }) => `Installing ${done}/${total}…`,
     installDone: ({ count }) => `Installed ${count} model(s)`,
-    installError: ({ errors }) => `Some installs failed: ${errors}`
+    installError: ({ errors }) => `Some installs failed: ${errors}`,
+    installProgress: ({ model, done, total }) => `Installing ${model} (${done}/${total})`
   },
   filters: {
     searchLabel: 'Search',

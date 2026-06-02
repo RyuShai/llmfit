@@ -489,6 +489,43 @@ tbody tr.selected {
 .metric-fill {
   height: 100%;
   background: linear-gradient(90deg, color-mix(in oklab, var(--accent) 65%, #f3b45d), var(--accent));
+  transition: width 0.3s ease;
+}
+
+.install-progress {
+  margin: 0 0 0.6rem 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+
+.install-progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.install-progress-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.install-progress-pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.install-progress-msg {
+  margin: 0.35rem 0 0 0;
+  font-size: 0.78rem;
+  color: var(--muted, #888);
 }
 
 .kpi-grid {

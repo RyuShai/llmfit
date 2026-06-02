@@ -180,11 +180,14 @@ export async function fetchUpdateStatus(signal) {
   return parseJsonOrThrow(response);
 }
 
-export async function installModel(modelName, opts = {}, signal) {
+export async function installModel(modelName, opts = {}, onProgress, signal) {
   const { id } = await startDownload(modelName, 'llamacpp', opts, signal);
   for (;;) {
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1000));
     const s = await fetchDownloadStatus(id, signal);
+    if (typeof onProgress === 'function') {
+      onProgress({ pct: s.progress_pct, message: s.message, status: s.status });
+    }
     if (s.status === 'done') return { ok: true };
     if (s.status === 'error') return { ok: false, error: s.message };
   }

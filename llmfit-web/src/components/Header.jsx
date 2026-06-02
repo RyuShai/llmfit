@@ -50,6 +50,9 @@ export default function Header() {
   const [updating, setUpdating] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [doneCount, setDoneCount] = useState(0);
+  const [currentModel, setCurrentModel] = useState('');
+  const [currentPct, setCurrentPct] = useState(0);
+  const [currentMessage, setCurrentMessage] = useState('');
   const [toast, setToast] = useState(null);
 
   function showToast(kind, msg) {
@@ -93,7 +96,17 @@ export default function Header() {
       const opts = m
         ? { quant: m.best_quant, vramGb: m.memory_available_gb }
         : {};
-      const r = await installModel(name, opts);
+      setCurrentModel(name);
+      setCurrentPct(0);
+      setCurrentMessage('');
+      const r = await installModel(name, opts, ({ pct, message }) => {
+        if (typeof pct === 'number' && Number.isFinite(pct)) {
+          setCurrentPct(Math.max(0, Math.min(100, pct)));
+        }
+        if (message) {
+          setCurrentMessage(message);
+        }
+      });
       if (r.ok) {
         done++;
         setDoneCount(done);
@@ -102,6 +115,9 @@ export default function Header() {
       }
     }
     setInstalling(false);
+    setCurrentModel('');
+    setCurrentPct(0);
+    setCurrentMessage('');
     clearInstallSelect();
     if (errors.length) {
       showToast('error', t('models.installError', { errors: errors.join('; ') }));
@@ -131,6 +147,25 @@ export default function Header() {
           style={{ margin: '0 0 0.5rem 0' }}
         >
           {toast.msg}
+        </div>
+      )}
+
+      {installing && (
+        <div className="install-progress" role="status" aria-live="polite">
+          <div className="install-progress-head">
+            <span className="install-progress-name">
+              {t('models.installProgress', {
+                model: currentModel,
+                done: doneCount + 1,
+                total: selectedForInstall.length + doneCount
+              })}
+            </span>
+            <span className="install-progress-pct">{Math.round(currentPct)}%</span>
+          </div>
+          <div className="metric-track">
+            <div className="metric-fill" style={{ width: `${currentPct}%` }} />
+          </div>
+          {currentMessage && <p className="install-progress-msg">{currentMessage}</p>}
         </div>
       )}
 
