@@ -318,7 +318,9 @@ mod tests {
     #[test]
     fn register_noop_when_env_unset() {
         // Ensure env var is absent.
-        std::env::remove_var("LLMFIT_REGISTRY_YAML");
+        // SAFETY: test-only single-threaded env mutation (edition 2024 marks
+        // env::set_var/remove_var unsafe due to cross-thread data-race risk).
+        unsafe { std::env::remove_var("LLMFIT_REGISTRY_YAML") };
         let result = register_model_yaml("some-model-Q4_K_M.gguf", "org/repo", None);
         assert_eq!(result, Ok(false));
     }
@@ -335,9 +337,11 @@ mod tests {
         let mut f = std::fs::File::create(&yaml_path).unwrap();
         f.write_all(existing.as_bytes()).unwrap();
 
-        std::env::set_var("LLMFIT_REGISTRY_YAML", yaml_path.to_str().unwrap());
+        // SAFETY: test-only single-threaded env mutation (edition 2024 marks
+        // env::set_var/remove_var unsafe due to cross-thread data-race risk).
+        unsafe { std::env::set_var("LLMFIT_REGISTRY_YAML", yaml_path.to_str().unwrap()) };
         let result = register_model_yaml("Llama-3.1-8B-Instruct-Q4_K_M.gguf", "org/repo", None);
-        std::env::remove_var("LLMFIT_REGISTRY_YAML");
+        unsafe { std::env::remove_var("LLMFIT_REGISTRY_YAML") };
 
         assert_eq!(result, Ok(false)); // skipped
     }

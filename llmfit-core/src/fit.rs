@@ -217,6 +217,7 @@ pub struct ModelFit {
     pub installed: bool,               // model found in a local runtime provider
     pub fits_with_turboquant: bool,    // TooTight at fp16 KV but fits with TurboQuant KV
     pub effective_context_length: u32, // context length used for memory estimation
+    pub requires_vllm: bool, // format is vLLM-only (CompressedTensors, AWQ, GPTQ, AutoRound)
 }
 
 impl ModelFit {
@@ -292,6 +293,19 @@ impl ModelFit {
             ));
         }
 
+        // vLLM-only format note — pushed before runtime selection so it appears
+        // at the top of the notes list regardless of execution path taken.
+        // Scoped to CompressedTensors (NVFP4/MXFP8/FP8): AWQ/GPTQ are also
+        // pre-quantized but can run on other engines (TGI/ExLlama), so we don't
+        // over-claim "vLLM-only" for them.
+        if model.format == models::ModelFormat::CompressedTensors {
+            notes.push(
+                "vLLM-only format; not loadable by llama.cpp. \
+                 vLLM has no production CPU/MoE offload — full weights must fit in VRAM."
+                    .to_string(),
+            );
+        }
+
         // Determine inference runtime up front so path selection can use
         // the correct quantization hierarchy.
         // Honour the force_runtime override first if provided; otherwise
@@ -357,17 +371,21 @@ impl ModelFit {
             } else if let Some(system_vram) = system.total_gpu_vram_gb {
                 // Use total VRAM across all same-model GPUs for fit scoring.
                 // Multi-GPU inference (tensor splitting) is supported by llama.cpp, vLLM, etc.
-                if model.is_moe && min_vram <= system_vram {
+                //
+                // MoE active-experts-in-VRAM and CPU expert-offload paths below assume
+                // llama.cpp's `-ot exps=CPU`. vLLM has no production CPU/MoE offload, so
+                // vLLM models (always pre-quantized) must fit their FULL weights in VRAM
+                // and are intentionally excluded from these MoE shortcuts.
+                let moe_can_offload = model.is_moe && runtime != InferenceRuntime::Vllm;
+                if moe_can_offload && min_vram <= system_vram {
                     // Fits in VRAM -- GPU path
                     notes.push("GPU: model loaded into VRAM".to_string());
-                    if model.is_moe {
-                        notes.push(format!(
-                            "MoE: all {} experts loaded in VRAM (optimal)",
-                            model.num_experts.unwrap_or(0)
-                        ));
-                    }
+                    notes.push(format!(
+                        "MoE: all {} experts loaded in VRAM (optimal)",
+                        model.num_experts.unwrap_or(0)
+                    ));
                     (RunMode::Gpu, min_vram, system_vram)
-                } else if model.is_moe {
+                } else if moe_can_offload {
                     // MoE model doesn't fit at default quant — but check if the full
                     // model fits at the best available quant before falling to offload.
                     // Many runtimes (llama.cpp, Ollama) load ALL experts into VRAM when
@@ -552,6 +570,7 @@ impl ModelFit {
             installed: false, // set later by App after provider detection
             fits_with_turboquant,
             effective_context_length: estimation_ctx,
+            requires_vllm: model.format.requires_vllm(),
         }
     }
 
@@ -2500,6 +2519,31 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
         }
+    }
+
+    #[test]
+    fn test_compressed_tensors_moe_requires_vllm_no_offload() {
+        // A vLLM-only (compressed-tensors / NVFP4) MoE model must NOT be reported
+        // as runnable via llama.cpp MoE expert-offload. vLLM has no production
+        // CPU/MoE offload, so the full quantized weights must fit in VRAM.
+        let mut model = test_moe_model(3.3);
+        model.format = models::ModelFormat::CompressedTensors;
+        model.name = "rdtand/Qwen3.6-35B-A3B-PrismaQuant-4.75bit-vllm".to_string();
+        let system = test_system_with_gpu(64.0, 16.0, "NVIDIA GeForce RTX 5080");
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        // vLLM-only → runtime is vLLM, never llama.cpp.
+        assert_eq!(fit.runtime, InferenceRuntime::Vllm);
+        assert!(fit.requires_vllm);
+        // No MoE/CPU offload shortcut under vLLM.
+        assert_ne!(fit.run_mode, RunMode::MoeOffload);
+        assert!(fit.moe_offloaded_gb.is_none());
+        // 81B weights cannot fit 16 GB VRAM with no offload.
+        assert!(fit.utilization_pct > 100.0);
+        assert_eq!(fit.fit_level, FitLevel::TooTight);
+        // The vLLM-only caveat must be surfaced to the user.
+        assert!(fit.notes.iter().any(|n| n.contains("vLLM-only")));
     }
 
     #[test]

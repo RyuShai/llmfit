@@ -494,6 +494,53 @@ fn detect_format(repo_id: &str, tags: &[String], cfg: Option<&HfConfig>) -> Mode
     ModelFormat::Gguf
 }
 
+/// Derive a display quantization label for a fetched model.
+///
+/// vLLM-only `CompressedTensors` repos carry their native bit-width in the repo
+/// id (e.g. `...-4.75bit-vllm`); surface that instead of the conservative GGUF
+/// approximation. Every other format keeps `Q4_K_M`, the long-standing
+/// memory-estimation placeholder for fetched models.
+fn native_quant_label(repo_id: &str, format: ModelFormat) -> String {
+    match format {
+        ModelFormat::CompressedTensors => {
+            let id = repo_id.to_lowercase();
+            if let Some(bits) = parse_bit_hint(&id) {
+                format!("compressed-tensors (~{}bit)", bits)
+            } else if id.contains("fp8") {
+                "compressed-tensors (FP8)".to_string()
+            } else if id.contains("nvfp4") || id.contains("fp4") {
+                "compressed-tensors (FP4)".to_string()
+            } else {
+                "compressed-tensors".to_string()
+            }
+        }
+        _ => "Q4_K_M".to_string(),
+    }
+}
+
+/// Parse a bit-width hint such as `4.75bit` or `4bit` from a lowercased string.
+/// Returns the numeric portion (e.g. `"4.75"`) when a `<number>bit` token is found.
+fn parse_bit_hint(id: &str) -> Option<String> {
+    let bytes = id.as_bytes();
+    let pos = id.find("bit")?;
+    let mut start = pos;
+    while start > 0 {
+        let c = bytes[start - 1] as char;
+        if c.is_ascii_digit() || c == '.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start < pos {
+        let num = &id[start..pos];
+        if num.parse::<f64>().is_ok() {
+            return Some(num.to_string());
+        }
+    }
+    None
+}
+
 // ── HF API fetching ───────────────────────────────────────────────────────────
 
 fn hf_get_list(sort: &str, limit: usize, token: Option<&str>) -> Result<Vec<HfApiModel>, String> {
@@ -656,6 +703,7 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
     };
 
     let architecture = cfg.as_ref().and_then(|c| c.model_type.clone());
+    let format = detect_format(&hf.id, &hf.tags, cfg.as_ref());
 
     Some(LlmModel {
         name: hf.id.clone(),
@@ -665,10 +713,10 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
         min_ram_gb: min_ram,
         recommended_ram_gb: rec_ram,
         min_vram_gb: min_vram,
-        // Q4_K_M is used as a conservative approximation for all fetched models.
-        // Actual available quantizations depend on the GGUF files published for
-        // each model.  RAM/VRAM estimates downstream reflect this assumption.
-        quantization: "Q4_K_M".to_string(),
+        // Q4_K_M is a conservative approximation for fetched GGUF models; vLLM-only
+        // CompressedTensors repos surface their native bit-width instead.
+        // RAM/VRAM estimates downstream reflect this assumption.
+        quantization: native_quant_label(&hf.id, format),
         context_length,
         use_case,
         is_moe,
@@ -678,7 +726,7 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
         release_date,
         gguf_sources: vec![],
         capabilities: vec![],
-        format: detect_format(&hf.id, &hf.tags, cfg.as_ref()),
+        format,
         num_attention_heads,
         num_key_value_heads,
         num_hidden_layers,
@@ -834,6 +882,63 @@ mod tests {
         assert_eq!(parse_param_str("INSTRUCT"), None);
         assert_eq!(parse_param_str(""), None);
         assert_eq!(parse_param_str("0.001B"), None); // below 0.05 threshold
+    }
+
+    #[test]
+    fn test_detect_format_name_heuristics() {
+        let no_tags: Vec<String> = vec![];
+        // vLLM-only PrismaQuant / NVFP4 / compressed-tensors repos.
+        assert_eq!(
+            detect_format(
+                "rdtand/Qwen3.6-35B-A3B-PrismaQuant-4.75bit-vllm",
+                &no_tags,
+                None
+            ),
+            ModelFormat::CompressedTensors
+        );
+        // Explicit GGUF marker wins.
+        assert_eq!(
+            detect_format("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", &no_tags, None),
+            ModelFormat::Gguf
+        );
+        // AWQ / GPTQ name markers.
+        assert_eq!(
+            detect_format("TheBloke/Llama-2-7B-AWQ", &no_tags, None),
+            ModelFormat::Awq
+        );
+        assert_eq!(
+            detect_format("TheBloke/Llama-2-7B-GPTQ", &no_tags, None),
+            ModelFormat::Gptq
+        );
+        // No markers → conservative default.
+        assert_eq!(
+            detect_format("meta-llama/Llama-3.1-8B-Instruct", &no_tags, None),
+            ModelFormat::Gguf
+        );
+    }
+
+    #[test]
+    fn test_native_quant_label() {
+        assert_eq!(
+            native_quant_label(
+                "rdtand/Qwen3.6-35B-A3B-PrismaQuant-4.75bit-vllm",
+                ModelFormat::CompressedTensors
+            ),
+            "compressed-tensors (~4.75bit)"
+        );
+        assert_eq!(
+            native_quant_label("org/model-fp8-vllm", ModelFormat::CompressedTensors),
+            "compressed-tensors (FP8)"
+        );
+        assert_eq!(
+            native_quant_label("org/model-nvfp4", ModelFormat::CompressedTensors),
+            "compressed-tensors (FP4)"
+        );
+        // Non-compressed formats keep the conservative GGUF placeholder.
+        assert_eq!(
+            native_quant_label("meta-llama/Llama-3.1-8B", ModelFormat::Gguf),
+            "Q4_K_M"
+        );
     }
 
     #[test]
