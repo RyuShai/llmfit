@@ -203,7 +203,9 @@ const zhCN = {
       estimatedTps: '预估 TPS'
     },
     noMoeValue: '是（MoE）',
-    noNotes: '该模型适配结果暂无额外说明。'
+    noNotes: '该模型适配结果暂无额外说明。',
+    vllmOnlyWarning:
+      '仅支持 vLLM 格式 —— llama.cpp 无法加载该模型。需要 vLLM 运行时，且全部权重必须放入显存（无 CPU/MoE 卸载）。'
   },
   plan: {
     title: '硬件规划',

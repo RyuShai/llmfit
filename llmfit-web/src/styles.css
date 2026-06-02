@@ -239,6 +239,12 @@ p {
   color: var(--danger);
 }
 
+.alert.warning {
+  background: var(--warn-soft);
+  border-color: color-mix(in oklab, var(--warn) 55%, var(--line));
+  color: var(--warn);
+}
+
 .system-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(220px, 1fr));

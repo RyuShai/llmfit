@@ -733,6 +733,7 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "moe_offloaded_gb": fit.moe_offloaded_gb.map(round2),
         "total_memory_gb": round2(fit.memory_required_gb + fit.moe_offloaded_gb.unwrap_or(0.0)),
         "utilization_pct": round1(fit.utilization_pct),
+        "requires_vllm": fit.requires_vllm,
         "notes": fit.notes,
         "gguf_sources": fit.model.gguf_sources,
         "installed": fit.installed,

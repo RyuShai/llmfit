@@ -203,7 +203,9 @@ const en = {
       estimatedTps: 'Estimated TPS'
     },
     noMoeValue: 'Yes (MoE)',
-    noNotes: 'No additional notes for this model fit.'
+    noNotes: 'No additional notes for this model fit.',
+    vllmOnlyWarning:
+      'vLLM-only format — llama.cpp cannot load this model. It needs the vLLM runtime, and the full weights must fit in VRAM (no CPU/MoE offload).'
   },
   plan: {
     title: 'Planning',

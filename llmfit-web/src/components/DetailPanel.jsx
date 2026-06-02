@@ -182,6 +182,12 @@ export default function DetailPanel() {
         </span>
       </div>
 
+      {selectedModel.requires_vllm && (
+        <div role="alert" className="alert warning vllm-only-alert">
+          ⚠️ {t('detail.vllmOnlyWarning')}
+        </div>
+      )}
+
       <dl className="details-grid">
         <div>
           <dt>{t('detail.fields.provider')}</dt>

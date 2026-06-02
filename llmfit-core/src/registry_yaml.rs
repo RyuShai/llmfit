@@ -311,8 +311,12 @@ mod tests {
 
     #[test]
     fn derive_family_extracts_first_segment() {
-        assert_eq!(derive_family("Llama-3-1-8B-Instruct-Q4"), "llama");
-        assert_eq!(derive_family("Qwen2-5-7B-Chat"), "qwen2");
+        // Family keeps the full model-name prefix before the size token
+        // (e.g. Llama 3.1 → "llama-3-1", Qwen 2.5 → "qwen2-5"). This is the
+        // model identity, which is what model-selection keys on — not a
+        // collapsed vendor name.
+        assert_eq!(derive_family("Llama-3-1-8B-Instruct-Q4"), "llama-3-1");
+        assert_eq!(derive_family("Qwen2-5-7B-Chat"), "qwen2-5");
     }
 
     #[test]
