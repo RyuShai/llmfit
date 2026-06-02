@@ -52,10 +52,32 @@ pub fn load_cache() -> Vec<LlmModel> {
         return vec![];
     };
     match serde_json::from_str::<CacheEnvelope>(&content) {
-        Ok(env) if env.version == CACHE_VERSION => env.models,
+        Ok(env) if env.version == CACHE_VERSION => {
+            env.models.into_iter().map(normalize_format).collect()
+        }
         // Version mismatch or old unversioned format — discard stale cache.
         _ => vec![],
     }
+}
+
+/// Re-derive a model's weight format from its repo name when it is still the
+/// default `Gguf`.
+///
+/// Both the compile-time embedded list and caches written before a detection
+/// rule existed store vLLM-only models as `Gguf`; this self-heals such entries
+/// (compressed-tensors / NVFP4 / AWQ / GPTQ) on load so they are not
+/// mislabelled as llama.cpp-runnable. Only upgrades *away* from `Gguf` (a name
+/// with no quant marker stays `Gguf`), and config metadata is unavailable here
+/// so detection is name-based (best-effort). Idempotent.
+pub fn normalize_format(mut m: LlmModel) -> LlmModel {
+    if m.format == ModelFormat::Gguf {
+        let derived = detect_format(&m.name, &[], None);
+        if derived != ModelFormat::Gguf {
+            m.quantization = native_quant_label(&m.name, derived);
+            m.format = derived;
+        }
+    }
+    m
 }
 
 /// Persist a model list to the cache file, creating the directory if needed.

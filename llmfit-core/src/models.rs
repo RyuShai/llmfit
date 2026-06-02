@@ -1202,7 +1202,14 @@ impl ModelDatabase {
     /// exists in the embedded list it is skipped to avoid duplication.
     /// Silently ignores a missing or corrupt cache file.
     pub fn new() -> Self {
-        let mut models = load_embedded();
+        // Normalize the embedded list's weight formats from repo names so
+        // vLLM-only models (compressed-tensors / NVFP4 / AWQ / GPTQ) baked in
+        // as the default `Gguf` are classified correctly. Cached models are
+        // normalized inside `load_cache`. Both are idempotent.
+        let mut models: Vec<LlmModel> = load_embedded()
+            .into_iter()
+            .map(crate::update::normalize_format)
+            .collect();
 
         // Merge cached models (from `llmfit update`) without duplicating.
         // canonical_slug normalizes org/ prefix, case, and separators so that
